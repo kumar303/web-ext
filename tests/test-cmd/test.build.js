@@ -3,10 +3,11 @@ import fs from 'mz/fs';
 import path from 'path';
 import {it, describe} from 'mocha';
 import {assert} from 'chai';
+import sinon from 'sinon';
 
 import build, {safeFileName, FileFilter} from '../../src/cmd/build';
 import {withTempDir} from '../../src/util/temp-dir';
-import {fixturePath, ZipFile} from '../helpers';
+import {fixturePath, makeSureItFails, ZipFile} from '../helpers';
 import {basicManifest} from '../test-util/test.manifest';
 
 
@@ -87,6 +88,74 @@ describe('build', () => {
           })
       );
     });
+
+    it('lets you rebuild when files change', () => withTempDir(
+      (tmpDir) => {
+        const onSourceChange = sinon.spy(() => {});
+        const sourceDir = fixturePath('minimal-web-ext');
+        const artifactsDir = tmpDir.path();
+        return build(
+          {sourceDir, artifactsDir, asNeeded: true},
+          {manifestData: basicManifest, onSourceChange})
+          .then((buildResult) => {
+            // Make sure we still have a build result.
+            assert.match(buildResult.extensionPath, /\.xpi$/);
+            return buildResult;
+          })
+          .then((buildResult) => {
+            assert.equal(onSourceChange.called, true);
+            const args = onSourceChange.firstCall.args[0];
+            assert.equal(args.sourceDir, sourceDir);
+            assert.equal(args.artifactsDir, artifactsDir);
+            assert.typeOf(args.onChange, 'function');
+
+            // Remove the built extension.
+            return fs.unlink(buildResult.extensionPath)
+              // Execute the onChange handler to make sure it gets built
+              // again. This simulates what happens when the file watcher
+              // executes the callback.
+              .then(() => args.onChange());
+          })
+          .then((buildResult) => {
+            assert.match(buildResult.extensionPath, /\.xpi$/);
+            return fs.stat(buildResult.extensionPath);
+          })
+          .then((stat) => {
+            assert.equal(stat.isFile(), true);
+          });
+      }
+    ));
+
+    it('throws errors when rebuilding in source watcher', () => withTempDir(
+      (tmpDir) => {
+        var packageResult = Promise.resolve({});
+        const createPackage = sinon.spy(() => packageResult);
+        const onSourceChange = sinon.spy(() => {});
+        return build(
+          {
+            sourceDir: fixturePath('minimal-web-ext'),
+            artifactsDir: tmpDir.path(),
+            asNeeded: true,
+          },
+          {manifestData: basicManifest, onSourceChange, createPackage})
+          .then(() => {
+            assert.equal(onSourceChange.called, true);
+            assert.equal(createPackage.callCount, 1);
+
+            const {onChange} = onSourceChange.firstCall.args[0];
+            packageResult = Promise.reject(new Error(
+              'Simulate an error on the second call to createPackage()'));
+            // Invoke the stub createPackage() again which should throw an error
+            return onChange();
+          })
+          .then(makeSureItFails())
+          .catch((error) => {
+            assert.include(
+              error.message,
+              'Simulate an error on the second call to createPackage()');
+          });
+      }
+    ));
 
   });
 
